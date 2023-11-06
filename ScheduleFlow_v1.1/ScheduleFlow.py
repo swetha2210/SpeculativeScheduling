@@ -12,24 +12,35 @@ import os
 import numpy as np
 import _intScheduleFlow
 from _intScheduleFlow import JobChangeType
+from datetime import datetime
+from datetime import timezone, timedelta
 
 
 class Simulator():
     ''' Main class of the simulation '''
 
     def __init__(self, loops=1, generate_gif=False, check_correctness=False,
-                 output_file_handler=None):
+                 output_file_handler=None, start_time=datetime.now()):
         ''' Constructor defining the main properties of a simulation '''
 
         assert (loops > 0), "Number of loops has to be a positive integer"
-
         self.__loops = loops
         self.__generate_gif = generate_gif
         self.__check_correctness = check_correctness
         self.__execution_log = {}
         self.job_list = []
         self.logger = logging.getLogger(__name__)
+        self.start_time = start_time
+        self.__total_carbon_emission = 0
 
+        # # Create a console handler to display log messages in the console
+        # console_handler = logging.StreamHandler()
+        # console_handler.setLevel(logging.WARNING)  # Set the log level for the console handler
+        # formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        # console_handler.setFormatter(formatter)
+        #
+        # # Add the console handler to the logger
+        # self.logger.addHandler(console_handler)
         self.__fp = output_file_handler
 
         if generate_gif:
@@ -58,8 +69,16 @@ class Simulator():
         if self.__generate_gif:
             self.__viz_handler = _intScheduleFlow.VizualizationEngine(
                     self.__system.get_total_nodes())
-
-        return self.add_applications(job_list)
+        job_list_count = self.add_applications(job_list)
+        # for job in self.job_list:
+        #     print(' Job id ' + str(job.job_id) + ' Nodes ' + str(job.nodes) + ' Walltime ' + str(
+        #         job.walltime) + ' Request wall time ' + str(job.request_walltime) +
+        #           ' Resubmit ' + str(job.resubmit) + ' submission time ' + str(
+        #         job.submission_time) + ' Job sequence ' + str(job.request_sequence)
+        #           + ' resubmit factor ' + str(job.resubmit_factor) + ' exec log ' + str(
+        #         job._Application__execution_log))
+        # print('')
+        return job_list_count
 
     def get_execution_log(self):
         ''' Method that returns the execution log. The log is a dictionary,
@@ -68,11 +87,10 @@ class Simulator():
 
     def add_applications(self, job_list):
         ''' Method for sending additional applications to the simulation '''
-
         for new_job in job_list:
             if new_job in self.job_list:
                 self.logger.warning("Job %s is already included "
-                                    "in the sumlation." % (new_job))
+                                    "in the simulation." % (new_job))
                 continue
             job_id_list = [job.job_id for job in self.job_list]
             if new_job.job_id == -1 or new_job.job_id in job_id_list:
@@ -172,9 +190,12 @@ class Simulator():
         assert (len(self.job_list) > 0), "Cannot run an empty scenario"
         check = 0
         for i in range(self.__loops):
-            runtime = _intScheduleFlow.Runtime(self.job_list)
+            # For each run, consider separately
+            self.__total_carbon_emission = 0
+            runtime = _intScheduleFlow.Runtime(self.job_list, self.logger, self.start_time)
             runtime(self.__scheduler)
             self.__execution_log = runtime.get_stats()
+            self.__total_carbon_emission = runtime.get_carbon_emission()
 
             if self.__check_correctness:
                 check += self.test_correctness()
@@ -185,7 +206,11 @@ class Simulator():
             self.stats.set_execution_output(self.__execution_log)
             self.logger.info(self.stats)
             if self.__fp is not None:
+                self.__fp.write("Scenario : makespan : utilization : average_job_utilization : "
+                      "average_job_response_time : average_job_stretch : "
+                      "average_job_wait_time : failures" + "\n")
                 self.stats.print_to_file(self.__fp, self.__scenario_name)
+                self.__fp.write("\n" + "Total carbon emissions due the jobs is " + str(self.__total_carbon_emission) + "\n" + "\n")
 
         if check == 0:
             self.logger.info("PASS correctness test")
@@ -236,6 +261,7 @@ class Application(object):
         self.job_id = -1
         self.request_sequence = requested_walltimes[1:]
         self.resubmit = True
+        self.carbon_emission = 0
         if resubmit_factor == -1:
             if len(self.request_sequence) == 0:
                 self.resubmit = False
@@ -260,11 +286,12 @@ class Application(object):
                self.request_walltime)
 
     def __repr__(self):
-        return r'Job(%d, %3.1f, %3.1f, %3.1f, %d)' % (self.nodes,
+        return r'Job(%d, %3.1f, %3.1f, %3.1f, %d, %3.1f)' % (self.nodes,
                                                       self.submission_time,
                                                       self.walltime,
                                                       self.request_walltime,
-                                                      self.job_id)
+                                                      self.job_id,
+                                                      self.carbon_emission)
 
     def __lt__(self, job):
         return self.job_id < job.job_id
@@ -288,6 +315,8 @@ class Application(object):
         return self.request_sequence[seq_len - 1] * pow(
             self.resubmit_factor, step - seq_len)
 
+
+# Why request time should be incremental?
     def overwrite_request_sequence(self, request_sequence):
         ''' Method for overwriting the sequence of future walltime
         requests '''

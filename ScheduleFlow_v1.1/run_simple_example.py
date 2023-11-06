@@ -10,12 +10,20 @@
 import ScheduleFlow
 import sys
 import numpy as np
+from datetime import datetime
 
 
 def run_scenario(num_procssing_units, job_list):
+    input_datetime_str = '2020-01-03T13:00:00+00:00'
+
+    # Define the format of the input datetime string
+    datetime_format = '%Y-%m-%dT%H:%M:%S%z'
+
+    # Parse the input datetime string and create a datetime object
+    start_time = datetime.strptime(input_datetime_str, datetime_format)
     simulator = ScheduleFlow.Simulator(check_correctness=True,
-                                       generate_gif=True,
-                                       output_file_handler=sys.stdout)
+                                       generate_gif=False,
+                                       output_file_handler=sys.stdout, start_time=start_time)
     sch = ScheduleFlow.BatchScheduler(
         ScheduleFlow.System(num_processing_units))
     simulator.create_scenario("test_batch", sch, job_list=job_list)
@@ -32,7 +40,7 @@ if __name__ == '__main__':
     job_list = set()
     # create the list of applications
     for i in range(10):
-        execution_time = np.random.randint(11, 100)
+        execution_time = np.random.randint(4, 8)
         request_time = execution_time + int(i / 2) * 10
         processing_units = np.random.randint(
             1, num_processing_units + 1)
@@ -43,11 +51,15 @@ if __name__ == '__main__':
             execution_time,
             [request_time]))
     # add a job that request less time than required for its first run
-    job_list.add(ScheduleFlow.Application(np.random.randint(9, 11), 0,
-                                          100, [90, 135]))
+    job_list.add(ScheduleFlow.Application(np.random.randint(9, 11), submission_time,
+                                          5, [4, 8]))
 
-    print("Scenario : makespan : utilization : average_job_utilization : "
-          "average_job_response_time : average_job_stretch : "
-          "average_job_wait_time : failures")
 
+    # print("Scenario : makespan : utilization : average_job_utilization : "
+    #       "average_job_response_time : average_job_stretch : "
+    #       "average_job_wait_time : failures")
+
+    # print("Scenario : makespan : utilization : average_job_utilization : "
+    #       "average_job_response_time : average_job_stretch : "
+    #       "average_job_wait_time : failures")
     run_scenario(num_processing_units, job_list)

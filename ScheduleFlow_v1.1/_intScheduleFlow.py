@@ -18,7 +18,9 @@ if sys.version_info[0] < 3:
     import collections as col
 else:
     import collections.abc as col
-
+from datetime import datetime, timedelta, time
+import pandas as pd
+import pytz
 
 class JobChangeType(IntEnum):
     ''' Enumeration class to hold all the types of changes
@@ -34,10 +36,11 @@ class EventType(IntEnum):
     The values give the order in which the simulator parses the events
     (e.g. JobEnd has the higher priority and will be evaluated first) '''
 
-    JobSubmission = 2
-    JobStart = 1
+    JobSubmission = 3
+    JobStart = 2
     JobEnd = 0
-    TriggerSchedule = 3
+    TriggerSchedule = 4
+    JobCarbonEmission = 1
 
 
 class EventQueue(object):
@@ -85,22 +88,53 @@ class Runtime(object):
     ''' Runtime class responsible for coordinating the submission and
     execution process for all the jobs in a workload '''
 
-    def __init__(self, workload, logger=None):
+    def __init__(self, workload, logger=None, start_time=datetime.now()):
         ''' Constructor method creates the job submission events for all
         jobs in the workload. It also requires a default facor value for
         increasing the request time of failed jobs (in case they do not
         contain a sequence of request walltimes '''
 
+        self.__start_date = start_time.date()
+        self.__start_time = start_time.hour
         self.__current_time = 0
         self.__reserved_jobs = {}  # reserved_job[job] = time_to_start
         self.__finished_jobs = {}  # finish_jobs[job] = [(start, end)]
         self.__events = EventQueue()
         self.__logger = logger or logging.getLogger(__name__)
+        self.__carbon_data = self.__get_carbon_data__()
+        self.__total_carbon_emission = 0
 
         # create submit_job events for all the applications in the list
         for job in workload:
             self.__events.push(
                 (job.submission_time, EventType.JobSubmission, job))
+
+    def __get_carbon_data__(self):
+        # Keep the path here. But think of a configurable parameter
+        df = None
+        file_path = r"E:\MasterInCS\Sem2\CS-701\SpeculativeScheduler\SpeculativeScheduling\ScheduleFlow_v1.1\US-CAL-CISO.csv"
+        try:
+            df = pd.read_csv(file_path).copy()
+            df['datetime'] = pd.to_datetime(df['datetime'])
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        return df
+
+    def __filter_and_extract_carbon_data__(self, start_date, start_hour, end_date, end_hour):
+        # Think how to send to set time automatically
+        start_datetime = pd.Timestamp(datetime.combine(start_date, time(start_hour, 0)), tzinfo=pytz.UTC)
+        end_datetime = pd.Timestamp(datetime.combine(end_date, time(end_hour, 0)), tzinfo=pytz.UTC)
+        result = None
+        if self.__carbon_data is not None:
+            df = self.__carbon_data
+            filtered_df = df[(df['datetime'] >= start_datetime) & (df['datetime'] < end_datetime)].copy()
+
+            # Split the 'datetime' column into 'date' and 'hour' columns
+            filtered_df['date'] = filtered_df['datetime'].dt.date
+            filtered_df['hour'] = filtered_df['datetime'].dt.hour
+
+            result = filtered_df[['date', 'hour', 'carbon_intensity_avg']]
+        return result
 
     def __call__(self, sch):
         ''' Method for execution the simulation on a given scheduler '''
@@ -111,7 +145,6 @@ class Runtime(object):
             # get next set of events
             current_events = self.__events.pop_list()
             self.__current_time = current_events[0][0]
-
             self.__logger.debug(r'[Timestamp %d] Receive events %s' % (
                 self.__current_time, current_events))
             self.__logger.debug(r'[Timestamp %d] Reservations %s' % (
@@ -123,6 +156,9 @@ class Runtime(object):
                     self.__job_subimssion_event(
                         event[2], EventType.TriggerSchedule not in [
                             i[1] for i in current_events])
+                # Added new event for carbon emission calculation
+                elif event[1] == EventType.JobCarbonEmission:
+                    self.__job_carbon_emission_event(event[2])
                 elif event[1] == EventType.JobStart:
                     self.__job_start_event(event[2])
                 elif event[1] == EventType.JobEnd:
@@ -160,7 +196,9 @@ class Runtime(object):
                 r'[Timestamp %d] Job submission %s fit at time %d' %
                 (self.__current_time, job, tm))
             self.__reserved_jobs[job] = tm
-            self.__events.push((tm, EventType.JobStart, job))
+            # Calculate the estimated carbon emission before starting the job
+            self.__events.push(tm, EventType.JobCarbonEmission, job)
+            # self.__events.push((tm, EventType.JobStart, job))
             return
         # if not submit it to the scheduler
         self.scheduler.submit_job(job)
@@ -174,8 +212,10 @@ class Runtime(object):
         # create a start job event for each job selected by the scheduler
         for apl in ret_schedule:
             self.__reserved_jobs[apl[1]] = self.__current_time + apl[0]
-            self.__events.push(
-                (self.__current_time + apl[0], EventType.JobStart, apl[1]))
+            # For all the jobs, schedule the carbon emission estimate calc event.
+            self.__events.push((self.__current_time + apl[0], EventType.JobCarbonEmission, apl[1]))
+            # self.__events.push(
+            #    (self.__current_time + apl[0], EventType.JobStart, apl[1]))
 
     def __job_end_event(self, job):
         ''' Method for handling a job end event '''
@@ -209,6 +249,45 @@ class Runtime(object):
         del self.__reserved_jobs[job]
         return ret
 
+    def __job_carbon_emission_event(self, job):
+        self.__logger.info(r'[Timestamp %d] Carbon Emission calculation for the job %s' % (
+            self.__current_time, job))
+
+        try:
+            if self.__carbon_data is not None and self.scheduler.system.get_free_nodes() >= job.nodes:
+                # Nodes can be allocated. Think of converting nodes to nodes and cores after disucssing with Abel
+                # Calculate the carbon emission
+                num_cores = job.nodes
+                execution_hours = min(job.walltime, job.request_walltime)
+                current_start_hour = self.__start_time + self.__current_time
+                current_start_date = self.__start_date
+                start_hour = self.__current_time
+                if current_start_hour >=24 :
+                    # i.e crossed a day since the start time. # Find the no of days and hours
+                    current_start_date += timedelta(current_start_hour // 24)
+                    current_start_hour = current_start_hour % 24
+
+                current_end_date = current_start_date
+                current_end_hour = current_start_hour + execution_hours  # __filter_and_extract_carbon_data__
+                if current_end_hour >= 24:
+                    current_end_date += timedelta(current_end_hour // 24)
+                    current_end_hour = current_end_hour % 24
+
+            carbon_data =  self.__filter_and_extract_carbon_data__(current_start_date, current_start_hour, current_end_date, current_end_hour)
+            job.carbon_emission = self.__calc_carbon_emission(carbon_data, num_cores)
+            self.__total_carbon_emission += job.carbon_emission
+            self.__logger.info(r'[Timestamp %d] Carbon Emission calculated for the job %s' % (self.__current_time, job))
+        except Exception as e:
+            print(f"An error occurred: {e}")
+        finally:
+            # Job start event
+            self.__events.push((self.__current_time, EventType.JobStart, job))
+
+
+    def __calc_carbon_emission(self, carbon_data, num_cores):
+        job_carbon_intensity = carbon_data['carbon_intensity_avg'].sum() * num_cores
+        return job_carbon_intensity
+
     def __job_start_event(self, job):
         ''' Method for handling a job start event '''
 
@@ -216,7 +295,12 @@ class Runtime(object):
             self.__current_time, job))
         self.scheduler.allocate_job(job)
         self.__log_start(job)
-        # create a job end event for the started job for timestamp
+        # create a job end event for the started job fo
+        #
+        #
+        #
+        #
+        # r timestamp
         # current_time+execution_time
         execution = min(job.walltime, job.request_walltime)
         self.__events.push(
@@ -238,10 +322,13 @@ class Runtime(object):
         self.__finished_jobs[job][last_execution][1] = self.__current_time
 
     def get_stats(self):
-        ''' Method for returning the log containing every jon start and
+        ''' Method for returning the log containing every job start and
         finish recorded during the simulation up to the current time '''
 
         return self.__finished_jobs
+
+    def get_carbon_emission(self):
+        return self.__total_carbon_emission
 
 
 class TexGenerator():
@@ -601,3 +688,11 @@ class StatsEngine():
              self.average_job_stretch(),
              self.average_job_wait_time(),
              self.total_failures()))
+        file_handler.write("\n")
+        file_handler.write("Job(Nodes, submission time, Walltime, request_time, JobId, CarbonEmission : [[start, end], [start, end]...] \n")
+        if len(self.__execution_log) > 0:
+            file_handler.write(str(self.__execution_log))
+            # for key in self.__execution_log.keys():
+            #     file_handler.write(str(key) + " : " + str(self.__execution_log[key]) + "\n")
+        # file_handler.write(str(self.__execution_log) + "\n")
+        # file_handler.write("\n")
