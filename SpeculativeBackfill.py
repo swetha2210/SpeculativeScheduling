@@ -1,5 +1,6 @@
 import sys
-sys.path.append("./ScheduleFlow_v1.1")
+import os
+sys.path.append(os.path.join(os.getcwd(), "ScheduleFlow_v1.1"))
 import ScheduleFlow
 
 

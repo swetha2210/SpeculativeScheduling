@@ -99,12 +99,13 @@ class Runtime(object):
         self.__current_time = 0
         self.__reserved_jobs = {}  # reserved_job[job] = time_to_start
         self.__finished_jobs = {}  # finish_jobs[job] = [(start, end)]
+        self.__finished_jobs_cores = {} # finished_jobs_cores[job] = [[list of cores]]
         self.__events = EventQueue()
         self.__logger = logger or logging.getLogger(__name__)
         self.__carbon_data = self.__get_carbon_data__()
         self.__total_carbon_emission = 0
 
-        # create submit_job events for all the applications in the list
+        # create submit_job events for all the applications in the job list(workload)
         for job in workload:
             self.__events.push(
                 (job.submission_time, EventType.JobSubmission, job))
@@ -112,7 +113,9 @@ class Runtime(object):
     def __get_carbon_data__(self):
         # Keep the path here. But think of a configurable parameter
         df = None
-        file_path = r"E:\MasterInCS\Sem2\CS-701\SpeculativeScheduler\SpeculativeScheduling\ScheduleFlow_v1.1\US-CAL-CISO.csv"
+        print(os.getcwd())
+        file_path = os.path.join(os.getcwd(), r'ScheduleFlow_v1.1/US-CAL-CISO.csv')
+        # file_path = r"E:\MasterInCS\Sem2\CS-701\SpeculativeScheduler\SpeculativeScheduling\ScheduleFlow_v1.1\US-CAL-CISO.csv"
         try:
             df = pd.read_csv(file_path).copy()
             df['datetime'] = pd.to_datetime(df['datetime'])
@@ -156,9 +159,9 @@ class Runtime(object):
                     self.__job_subimssion_event(
                         event[2], EventType.TriggerSchedule not in [
                             i[1] for i in current_events])
-                # Added new event for carbon emission calculation
-                elif event[1] == EventType.JobCarbonEmission:
-                    self.__job_carbon_emission_event(event[2])
+                # # Added new event for carbon emission calculation
+                # elif event[1] == EventType.JobCarbonEmission:
+                #     self.__job_carbon_emission_event(event[2])
                 elif event[1] == EventType.JobStart:
                     self.__job_start_event(event[2])
                 elif event[1] == EventType.JobEnd:
@@ -197,8 +200,8 @@ class Runtime(object):
                 (self.__current_time, job, tm))
             self.__reserved_jobs[job] = tm
             # Calculate the estimated carbon emission before starting the job
-            self.__events.push(tm, EventType.JobCarbonEmission, job)
-            # self.__events.push((tm, EventType.JobStart, job))
+            # self.__events.push((tm, EventType.JobCarbonEmission, job))
+            self.__events.push((tm, EventType.JobStart, job))
             return
         # if not submit it to the scheduler
         self.scheduler.submit_job(job)
@@ -213,9 +216,9 @@ class Runtime(object):
         for apl in ret_schedule:
             self.__reserved_jobs[apl[1]] = self.__current_time + apl[0]
             # For all the jobs, schedule the carbon emission estimate calc event.
-            self.__events.push((self.__current_time + apl[0], EventType.JobCarbonEmission, apl[1]))
-            # self.__events.push(
-            #    (self.__current_time + apl[0], EventType.JobStart, apl[1]))
+            # self.__events.push((self.__current_time + apl[0], EventType.JobCarbonEmission, apl[1]))
+            self.__events.push(
+               (self.__current_time + apl[0], EventType.JobStart, apl[1]))
 
     def __job_end_event(self, job):
         ''' Method for handling a job end event '''
@@ -249,44 +252,44 @@ class Runtime(object):
         del self.__reserved_jobs[job]
         return ret
 
-    def __job_carbon_emission_event(self, job):
-        self.__logger.info(r'[Timestamp %d] Carbon Emission calculation for the job %s' % (
-            self.__current_time, job))
+    # def __job_carbon_emission_event(self, job):
+    #     self.__logger.info(r'[Timestamp %d] Carbon Emission calculation for the job %s' % (
+    #         self.__current_time, job))
 
-        try:
-            if self.__carbon_data is not None and self.scheduler.system.get_free_nodes() >= job.nodes:
-                # Nodes can be allocated. Think of converting nodes to nodes and cores after disucssing with Abel
-                # Calculate the carbon emission
-                num_cores = job.nodes
-                execution_hours = min(job.walltime, job.request_walltime)
-                current_start_hour = self.__start_time + self.__current_time
-                current_start_date = self.__start_date
-                start_hour = self.__current_time
-                if current_start_hour >=24 :
-                    # i.e crossed a day since the start time. # Find the no of days and hours
-                    current_start_date += timedelta(current_start_hour // 24)
-                    current_start_hour = current_start_hour % 24
+    #     try:
+    #         if self.__carbon_data is not None and self.scheduler.system.get_free_nodes() >= job.nodes:
+    #             # Nodes can be allocated. Think of converting nodes to nodes and cores after disucssing with Abel
+    #             # Calculate the carbon emission
+    #             num_cores = job.nodes
+    #             execution_hours = min(job.walltime, job.request_walltime)
+    #             current_start_hour = self.__start_time + self.__current_time
+    #             current_start_date = self.__start_date
+    #             start_hour = self.__current_time
+    #             if current_start_hour >=24 :
+    #                 # i.e crossed a day since the start time. # Find the no of days and hours
+    #                 current_start_date += timedelta(current_start_hour // 24)
+    #                 current_start_hour = current_start_hour % 24
 
-                current_end_date = current_start_date
-                current_end_hour = current_start_hour + execution_hours  # __filter_and_extract_carbon_data__
-                if current_end_hour >= 24:
-                    current_end_date += timedelta(current_end_hour // 24)
-                    current_end_hour = current_end_hour % 24
+    #             current_end_date = current_start_date
+    #             current_end_hour = current_start_hour + execution_hours  # __filter_and_extract_carbon_data__
+    #             if current_end_hour >= 24:
+    #                 current_end_date += timedelta(current_end_hour // 24)
+    #                 current_end_hour = current_end_hour % 24
 
-            carbon_data =  self.__filter_and_extract_carbon_data__(current_start_date, current_start_hour, current_end_date, current_end_hour)
-            job.carbon_emission = self.__calc_carbon_emission(carbon_data, num_cores)
-            self.__total_carbon_emission += job.carbon_emission
-            self.__logger.info(r'[Timestamp %d] Carbon Emission calculated for the job %s' % (self.__current_time, job))
-        except Exception as e:
-            print(f"An error occurred: {e}")
-        finally:
-            # Job start event
-            self.__events.push((self.__current_time, EventType.JobStart, job))
+    #             carbon_data =  self.__filter_and_extract_carbon_data__(current_start_date, current_start_hour, current_end_date, current_end_hour)
+    #             job.carbon_emission = self.__calc_carbon_emission(carbon_data, num_cores)
+    #             self.__total_carbon_emission += job.carbon_emission
+    #             self.__logger.info(r'[Timestamp %d] Carbon Emission calculated for the job %s' % (self.__current_time, job))
+    #     except Exception as e:
+    #         print(f"An error occurred: {e}")
+    #     finally:
+    #         # Job start event
+    #         self.__events.push((self.__current_time, EventType.JobStart, job))
 
 
-    def __calc_carbon_emission(self, carbon_data, num_cores):
-        job_carbon_intensity = carbon_data['carbon_intensity_avg'].sum() * num_cores
-        return job_carbon_intensity
+    # def __calc_carbon_emission(self, carbon_data, num_cores):
+    #     job_carbon_intensity = carbon_data['carbon_intensity_avg'].sum() * num_cores
+    #     return job_carbon_intensity
 
     def __job_start_event(self, job):
         ''' Method for handling a job start event '''
@@ -326,6 +329,11 @@ class Runtime(object):
         finish recorded during the simulation up to the current time '''
 
         return self.__finished_jobs
+    
+    def get_stats_cores(self):
+        ''' Method for returning the log containing every job cores
+        recorded during the simulation up to the current time '''
+        return self.__finished_jobs_cores
 
     def get_carbon_emission(self):
         return self.__total_carbon_emission

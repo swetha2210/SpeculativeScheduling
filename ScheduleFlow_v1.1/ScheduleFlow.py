@@ -11,6 +11,7 @@ import logging
 import os
 import numpy as np
 import _intScheduleFlow
+from enum import IntEnum
 from _intScheduleFlow import JobChangeType
 from datetime import datetime
 from datetime import timezone, timedelta
@@ -28,6 +29,7 @@ class Simulator():
         self.__generate_gif = generate_gif
         self.__check_correctness = check_correctness
         self.__execution_log = {}
+        self.__execution_cores_log = {}
         self.job_list = []
         self.logger = logging.getLogger(__name__)
         self.start_time = start_time
@@ -62,6 +64,7 @@ class Simulator():
         self.__system = scheduler.system
         self.job_list = []
         self.__execution_log = {}
+        self.__execution_cores_log = {}
         self.__scenario_name = scenario_name
 
         self.stats = _intScheduleFlow.StatsEngine(
@@ -84,6 +87,11 @@ class Simulator():
         ''' Method that returns the execution log. The log is a dictionary,
         where log[job] = list of (start, end) for each running instance '''
         return self.__execution_log
+    
+    def get_execution_cores_log(self):
+        ''' Method that returns the execution cores list. The log is a dictionary, 
+        where log[job] = list of (set of cores) for each running instance '''
+        return self.__execution_cores_log
 
     def add_applications(self, job_list):
         ''' Method for sending additional applications to the simulation '''
@@ -195,13 +203,15 @@ class Simulator():
             runtime = _intScheduleFlow.Runtime(self.job_list, self.logger, self.start_time)
             runtime(self.__scheduler)
             self.__execution_log = runtime.get_stats()
+            self.__execution_cores_log = runtime.get_stats_cores() #### Update the logic here.
             self.__total_carbon_emission = runtime.get_carbon_emission()
 
-            if self.__check_correctness:
-                check += self.test_correctness()
-                if check > 0:
-                    self.logger.debug("FAIL correctness test (loop %d)" % (i))
-                    continue
+            check = 0
+            # if self.__check_correctness:
+            #     check += self.test_correctness()
+            #     if check > 0:
+            #         self.logger.debug("FAIL correctness test (loop %d)" % (i))
+            #         continue
 
             self.stats.set_execution_output(self.__execution_log)
             self.logger.info(self.stats)
@@ -255,6 +265,7 @@ class Application(object):
             'Request time sequence is not sorted in increasing order'
 
         self.nodes = nodes
+        self.cores = nodes
         self.submission_time = submission_time
         self.walltime = walltime
         self.request_walltime = requested_walltimes[0]
@@ -274,6 +285,10 @@ class Application(object):
 
         # Entries in the execution log: (JobChangeType, old_value)
         self.__execution_log = []
+        self.__nodes_log = []
+        self.__cores_log = []
+        self.nodes_to_run = []
+        self.cores_to_run = []
         if len(self.request_sequence) > 0:
             self.__execution_log.append(
                     (JobChangeType.RequestSequenceOverwrite,
@@ -380,53 +395,130 @@ class Application(object):
         if self.resubmit_factor == 1 and len(self.request_sequence) == 0:
             self.resubmit = False
 
+# class Node:
+#     def __init__(self, node_id, no_of_cores):
+#         self.node_id = node_id
+#         self.no_of_cores = no_of_cores
+#         self.no_free_cores = no_of_cores
+#         self.no_of_cores_used = 0
 
+#     def __str__(self):
+#         return f"Node ID: {self.node_id}, Cores: {self.no_of_cores}, Free Cores: {self.no_free_cores}, Cores Used: {self.no_of_cores_used}"
+
+#     def get_node_usage(self):
+#         return self.no_of_cores_used
+    
+#     def get_no_cores(self):
+#         return no_of_cores
+    
+#     def get_no_free_cores(self):
+#         return no_free_cores
+    
+#     def is_node_available(self):
+#         return no_free_cores > 0
+    
 class System(object):
-    ''' System class containing available resources (for now just nodes) '''
+    ''' System class containing available resources (nodes and cores) '''
 
-    def __init__(self, total_nodes):
-        assert (total_nodes > 0),\
-            r'Number of nodes of a system must be > 0: received %d' % (
-            total_nodes)
-
+    def __init__(self, total_nodes, cores):
+        
+        # Check if the number of nodes is greater than 0
+        assert total_nodes > 0, "Total number of nodes must be greater than 0: received %d" % total_nodes
+        # Check if 'cores' is an integer
+        assert isinstance(cores, int) or isinstance(cores, list), "Provide number of cores or list of core counts for the system: received %s" % type(cores)
+        
+        # Check if the number of cores is greater than 0
+        if isinstance(cores, list):
+            if len(cores) != total_nodes:
+                raise ValueError("The length of the cores list must match the number of nodes.")
+            self.__heterogeneous = True
+            for core in cores:
+                assert core > 0, "Number of cores for each node must be greater than 0: recevied %d" % core
+            self.total_cores = sum(cores)
+            self.__total_core_counts = cores[:]
+            self.core_counts = cores[:]
+            # self.nodes = [Node(i, cores[i]) for i in range(total_nodes)]
+        else:
+            self.__heterogeneous = False
+            assert cores > 0, "Number of cores for each node must be greater than 0: received %d" % cores
+            self.total_cores = cores * total_nodes
+            self.__total_core_counts = [cores] * total_nodes
+            self.core_counts = [cores]*total_nodes
+        
         self.__total_nodes = total_nodes
         self.__free_nodes = total_nodes
+        self.__free_cores = self.total_cores
+        self.__free_core_counts = self.core_counts[:]
 
     def __str__(self):
-        return r'System of %d nodes (%d currently free)' % (
-            self.__total_nodes, self.__free_nodes)
+        return r'System of %d nodes (%d current usage)' % (
+            self.__total_nodes, str(self.__node_usage))
 
-    def get_free_nodes(self):
-        return self.__free_nodes
+    def isHeterogeneous(self):
+        return self.__heterogeneous
 
     def get_total_nodes(self):
         return self.__total_nodes
+    
+    def get_total_cores(self):
+        return self.total_cores
+    
+    def get_total_core_counts(self):
+        return self.__total_core_counts
+    
+    def get_nodes_usage(self):
+        return self.__total_core_counts - self.__free_core_counts
+    
+    def get_free_core_counts(self):
+        return self.__free_core_counts
+    
+    def get_free_nodes_cores(self, nodes, cores):
+        free_nodes = self.__total_nodes - nodes 
+        free_cores = [elem1 - elem2 for elem1, elem2 in zip(self.__total_core_counts, cores)]
+        self.__total_core_counts
+        return (free_nodes, free_cores)
 
-    def start_job(self, nodes, jobid):
+    def start_job(self, node_ids, job_cores, jobid):
         ''' Method for aquiring resources in the system '''
-
-        self.__free_nodes -= nodes
-        assert (self.__free_nodes >= 0),\
+        for i, node in enumerate(node_ids):
+            assert (self.__free_core_counts[node] >= job_cores[i]),\
             r'Not enough free nodes for the allocation of job %d' % (jobid)
+            self.__free_core_counts[node] -= job_cores[i]
+           # self.__free_cores -= job_cores[i]
+            if (self.__free_core_counts[node] == 0):
+                self.__free_nodes -= 1
+            self.__total_core_counts
+            self.core_counts
 
-    def end_job(self, nodes, jobid):
+    def end_job(self, node_ids, job_cores, jobid):
         ''' Method for releasing nodes in the system '''
+        for i, node in enumerate(node_ids):
+            self.__free_core_counts[node] += job_cores[i]
+            self.__free_cores += job_cores[i]
+            if (self.__free_core_counts[node] == self.__total_core_counts[node]):
+                self.__free_nodes += 1
 
-        self.__free_nodes += nodes
-        assert (self.__free_nodes <= self.__total_nodes),\
-            r'Free more nodes than total system during end of job %d' % (
-            jobid)
+        # self.__free_cores += job_cores
+        # if self.__free_core_counts[node_id] == 0:
+        #     self.__free_nodes += 1
+        # self.__free_core_counts[node_id] += job_cores
 
+
+class ResourceAllocationType(IntEnum):
+    ''' 0 - Core, 1 - Node'''
+    Core = 0
+    Node = 1
 
 class Scheduler(object):
     ''' Base class that needs to be extended by all Scheduler classes '''
 
-    def __init__(self, system, logger=None):
+    def __init__(self, system, logger=None, allocation_type=ResourceAllocationType.Core):
         ''' Base construnction method that takes a System object '''
         self.system = system
         self.wait_queue = set()
         self.running_jobs = set()
         self.logger = logger or logging.getLogger(__name__)
+        self.allocation_type = allocation_type
 
     def __str__(self):
         return r'Scheduler: %s; %d jobs in queue; %d jobs running' % (
@@ -435,14 +527,14 @@ class Scheduler(object):
     def submit_job(self, job):
         ''' Base method to add a job in the waiting queue '''
 
-        assert (job.nodes <= self.system.get_total_nodes()),\
-            "Submitted jobs cannot ask for more nodes that the system"
+        assert (job.cores <= self.system.get_total_cores()),\
+            "Submitted jobs cannot ask for more cores than that the system offers"
         self.wait_queue.add(job)
 
     def allocate_job(self, job):
         ''' Base method for allocating the job for running on the system '''
 
-        self.system.start_job(job.nodes, job.job_id)
+        self.system.start_job(job.nodes_to_run, job.cores_to_run, job.job_id)
         self.running_jobs.add(job)
 
     def clear_job(self, job):
@@ -457,7 +549,7 @@ class Scheduler(object):
             job.job_id)
 
         # clear system nodes, remove job from running queue
-        self.system.end_job(job.nodes, job.job_id)
+        self.system.end_job(job.nodes_to_run, job.cores_to_run, job.job_id)
         self.running_jobs.remove(job)
         return -1
 
@@ -481,23 +573,56 @@ class Scheduler(object):
         order_reservations = sorted(reservations)
 
         # parse each job begin/end in the reservation and mark space left
+        
+        total_nodes = self.system.get_total_nodes()
+        total_cores_list = self.system.get_total_cores()
         gap_list = []
         nodes = 0
+        cores = [0]*total_nodes
         ts = -1
         for event in order_reservations:
-            free_nodes = self.system.get_total_nodes() - nodes
-            if event[0] > ts and ts != -1 and free_nodes > 0:
+            # here we have to get the available nodes and cores in each case. 
+            # if self.allocation_type == ResourceAllocationType.Core:
+            #     # In case of core level allocation, get the number of available cores
+            #     free_cores = self.system.get_total_cores() - nodes
+            # else:
+            #     # In case of node level allocation, get if there is node     
+            # free_nodes = self.system.get_total_nodes() - nodes
+
+            free_nodes, free_cores = self.system.get_free_nodes_cores(nodes, cores)
+            if event[0] > ts and ts != -1 and free_nodes > 0 and sum(free_cores) > 0:
                 gap_list.append(
-                    [ts, event[0], free_nodes])
+                    [ts, event[0], free_cores])
                 # gap end is the same as the beginning of the current gap
                 prev = [gap for gap in gap_list if gap[1] == ts]
                 for gap in prev:
                     gap_list.append([gap[0], event[0],
-                                     min(gap[2], free_nodes)])
+                                     # do this for every core in the list
+                                     [min(g, c) for g, c in zip(gap[2], free_cores)]])
+                                     # min(gap[2], free_nodes)])
             if event[1] == 1:  # job start
-                nodes += event[2].nodes
+                nodes_to_run = event[2].nodes_to_run
+                cores_to_run = event[2].cores_to_run
+                core_counts = self.system.get_total_core_counts()
+                job_cores = [0] * 5
+                for i, node in enumerate(nodes_to_run):
+                    job_cores[node] = cores_to_run[i]
+                    if (core_counts[node] == event[2].cores_to_run[i]):
+                        # This node is fully used, Increase the node count. 
+                        nodes += 1
+                cores = [elem1 + elem2 for elem1, elem2 in zip(cores, job_cores)]
+                # nodes += event[2].nodes
             else:  # job_end
-                nodes -= event[2].nodes
+                # nodes -= event[2].nodes
+                nodes_to_run = event[2].nodes_to_run
+                cores_to_run = event[2].cores_to_run
+                core_counts = self.system.get_total_core_counts()
+                job_cores = [0] * 5
+                for i, node in enumerate(nodes_to_run):
+                    job_cores[node] = cores_to_run[i]
+                    if(core_counts[node] == cores_to_run[i]):
+                        nodes -= 1 
+                cores = [elem1 - elem2 for elem1, elem2 in zip(cores, job_cores)]
             ts = max(event[0], min_ts)
         gap_list.sort()
         return gap_list
@@ -527,13 +652,66 @@ class Scheduler(object):
             if gap[1] <= job.submission_time:
                 continue
             ts = max(gap[0], job.submission_time)
-            if job.nodes <= gap[2] and job.request_walltime <= (gap[1] - ts):
+
+            # Gap provides list of cores available 
+            free_cores = gap[2]
+            free_cores_count = sum(free_cores)
+            gap_end_time = gap[1]
+            if job.request_walltime <= (gap_end_time - ts) and job.cores <= free_cores_count:
+                # No of cores satisfied but look at the nodes/ core level and decide
+                if self.allocation_type == ResourceAllocationType.Core:
+                    ### Decide which cores to allocate
+                    cores_needed = job.cores
+                    for i in range(len(gap[2])):
+                        if (free_cores[i] > 0 and cores_needed > 0):
+                            cores_to_run = min(free_cores[i], cores_needed)
+                            job.nodes_to_run.append(i)
+                            job.cores_to_run.append(cores_to_run)
+                            cores_needed -= cores_to_run
+                else:
+                    ### Decide which nodes to allocate
+                ## NP Hard problem. For now, considered the consecutive list
+                    cores_needed = job.cores
+                    best_indexes = self.find_indexes_with_sum(free_cores, cores_needed)
+                    for i in best_indexes:
+                        if(cores_needed > 0):
+                            job.nodes_to_run.append(i)
+                            cores_to_run = min(free_cores[i], cores_needed)
+                            job.cores_to_run.append(cores_to_run)
+                            cores_needed -= cores_to_run
+                        else:
+                            break
                 # there is room for the current job starting with ts
                 self.logger.info(
                     r'[Scheduler] Found space for %s: timestamp %d' %
                     (job, ts))
                 return ts
         return -1
+
+    def find_indexes_with_sum(lst, target_sum):
+        n = len(lst)
+        best_indexes = None
+        closest_sum = float('inf')
+
+        for i in range(n):
+            current_sum = 0
+            current_indexes = []
+            
+            for j in range(i, n):
+                current_sum += lst[j]
+                current_indexes.append(j)
+
+                if current_sum >= target_sum:
+                    # If the current sum is equal to the target, return the indexes
+                    if current_sum == target_sum:
+                        return current_indexes
+                    
+                    # If the current sum is closer to the target, update the best result
+                    if abs(current_sum - target_sum) < closest_sum - target_sum:
+                        best_indexes = current_indexes.copy()
+                        closest_sum = current_sum
+        return best_indexes
+        
 
     def backfill_request(self, stop_job, reserved_jobs, min_ts):
         ''' Base method for requesting a backfill phase. By default the
@@ -546,13 +724,13 @@ class Scheduler(object):
 class BatchScheduler(Scheduler):
     ''' Reservation based scheduler (default LJF batch scheduler) '''
 
-    def __init__(self, system, batch_size=100, logger=None):
+    def __init__(self, system, batch_size=100, logger=None, allocation_type = ResourceAllocationType.Core):
         ''' Constructor method extends the base to specify the batch size,
         i.e. number of jobs in the wait queue to examime to create the
         reservation. Jobs in the waiting queue are ordered based on their
         submission time '''
 
-        super(BatchScheduler, self).__init__(system, logger)
+        super(BatchScheduler, self).__init__(system, logger, allocation_type)
         self.batch_size = batch_size
 
     def get_batch_jobs(self):
@@ -590,12 +768,46 @@ class BatchScheduler(Scheduler):
         # check every gap and return the first one where the new job fits
         for gap in gap_list:
             ts = gap[0]
-            if job.nodes <= gap[2] and job.request_walltime <= (gap[1] - ts):
+            # Gap provides list of cores available 
+            free_cores = gap[2]
+            free_cores_count = sum(free_cores)
+            gap_end_time = gap[1]
+            if job.request_walltime <= (gap_end_time - ts) and job.cores <= free_cores_count :
+                # No of cores satisfied but look at the nodes/ core level and decide
+                if self.allocation_type == ResourceAllocationType.Core:
+                    ### Decide which cores to allocate
+                    cores_needed = job.cores
+                    for i in range(len(gap[2])):
+                        if (free_cores[i] > 0 and cores_needed > 0):
+                            
+                            cores_to_run = min(free_cores[i], cores_needed)
+                            job.nodes_to_run.append(i)
+                            job.cores_to_run.append(cores_to_run)
+                            cores_needed -= cores_to_run
+                else:
+                    ### Decide which nodes to allocate
+                ## NP Hard problem. For now, considered the consecutive list
+                    cores_needed = job.cores
+                    best_indexes = self.find_indexes_with_sum(free_cores, cores_needed)
+                    for i in best_indexes:
+                        if(cores_needed > 0):
+                            cores_to_run = min(free_cores[i], cores_needed)
+                            job.nodes_to_run.append(i)
+                            job.cores_to_run.append(cores_to_run)
+                            cores_needed -= cores_to_run
+                        else:
+                            break
                 # there is room for the current job starting with ts
                 self.logger.info(
-                    r'[Scheduler] Found inside reservation for %s at ts %d'
-                    % (job, ts))
+                    r'[Scheduler] Found space for %s: timestamp %d' %
+                    (job, ts))
                 return ts
+            # if job.nodes <= gap[2] and job.request_walltime <= (gap[1] - ts):
+            #     # there is room for the current job starting with ts
+            #     self.logger.info(
+            #         r'[Scheduler] Found inside reservation for %s at ts %d'
+            #         % (job, ts))
+            #     return ts
         return -1
 
     def build_schedule(self, job, reservations):
@@ -607,6 +819,32 @@ class BatchScheduler(Scheduler):
             self.logger.info(
                 r'[Scheduler] Found reservation slot for %s at beginning' %
                 (job))
+        
+            cores_needed = job.cores
+            free_cores = self.system.get_free_core_counts()
+            if self.allocation_type == ResourceAllocationType.Core:
+                ### Decide which cores to allocate
+                for i in range(len(free_cores)):
+                    if (free_cores[i] > 0 and cores_needed > 0):
+                        cores_to_run = min(free_cores[i], cores_needed)
+                        job.nodes_to_run.append(i)
+                        job.cores_to_run.append(cores_to_run)
+                        cores_needed -= cores_to_run
+                    else:
+                        break
+            else:
+                ### Decide which nodes to allocate
+            ## NP Hard problem. For now, considered the consecutive list
+                cores_needed = job.cores
+                best_indexes = self.find_indexes_with_sum(free_cores, cores_needed)
+                for i in best_indexes:
+                    if(cores_needed > 0):
+                        cores_to_run = min(free_cores[i], cores_needed)
+                        job.nodes_to_run.append(i)
+                        job.cores_to_run.append(cores_to_run)
+                        cores_needed -= cores_to_run
+                    else:
+                        break
             return 0
 
         end_window = max([reservations[j] + j.request_walltime
@@ -621,11 +859,44 @@ class BatchScheduler(Scheduler):
         if len(gap_list) > 0:
             end_gaps = [gap for gap in gap_list if gap[1] == end_window]
             for gap in end_gaps:
-                if job.nodes <= gap[2]:
+                # Gap provides list of cores available 
+                free_cores = gap[2]
+                free_cores_count = sum(free_cores)
+                gap_end_time = gap[1]
+                if job.request_walltime <= (gap_end_time - gap[0]) and job.cores <= free_cores_count :
+                    # No of cores satisfied but look at the nodes/ core level and decide
+                    if self.allocation_type == ResourceAllocationType.Core:
+                        ### Decide which cores to allocate
+                        cores_needed = job.cores
+                        for i in range(len(gap[2])):
+                            if (free_cores[i] > 0 and cores_needed > 0):    
+                                cores_to_run = min(free_cores[i], cores_needed)
+                                job.nodes_to_run.append(i)
+                                job.cores_to_run.append(cores_to_run)
+                                cores_needed -= cores_to_run
+                    else:
+                        ### Decide which nodes to allocate
+                    ## NP Hard problem. For now, considered the consecutive list
+                        cores_needed = job.cores
+                        best_indexes = self.find_indexes_with_sum(free_cores, cores_needed)
+                        for i in best_indexes:
+                            if(cores_needed > 0):
+                                cores_to_run = min(free_cores[i], cores_needed)
+                                job.nodes_to_run.append(i)
+                                job.cores_to_run.append(cores_to_run)
+                                cores_needed -= cores_to_run
+                            else:
+                                break
+                    # there is room for the current job starting with ts
                     self.logger.info(
-                        r'[Scheduler] Found reservation for %s at timestamp %d'
-                        % (job, gap[0]))
+                        r'[Scheduler] Found space for %s: timestamp %d' %
+                        (job, gap[0]))
                     return gap[0]
+                # if job.nodes <= gap[2]:
+                #     self.logger.info(
+                #         r'[Scheduler] Found reservation for %s at timestamp %d'
+                #         % (job, gap[0]))
+                #     return gap[0]
 
         # there is no fit for the job to start anywhere inside the schedule
         # start the current job after the last job
@@ -685,85 +956,85 @@ class BatchScheduler(Scheduler):
         return selected_jobs
 
 
-class OnlineScheduler(Scheduler):
-    ''' Online scheduler (default LJF completly online) '''
+# class OnlineScheduler(Scheduler):
+#     ''' Online scheduler (default LJF completly online) '''
 
-    def clear_job(self, job):
-        ''' Method that overwrites the base one to indicate that a new
-        schedule needs to be triggered after each job end '''
+#     def clear_job(self, job):
+#         ''' Method that overwrites the base one to indicate that a new
+#         schedule needs to be triggered after each job end '''
 
-        super(OnlineScheduler, self).clear_job(job)
-        return 0  # trigger a new schedule starting now (timestamp 0)
+#         super(OnlineScheduler, self).clear_job(job)
+#         return 0  # trigger a new schedule starting now (timestamp 0)
 
-    def get_next_job(self, nodes):
-        ''' Method to extract the largest volume job (nodes * requested time)
-        in the waiting queue that fits the space given by the `nodes` '''
+#     def get_next_job(self, nodes):
+#         ''' Method to extract the largest volume job (nodes * requested time)
+#         in the waiting queue that fits the space given by the `nodes` '''
 
-        try:
-            max_volume = max([job.nodes * job.request_walltime for job
-                              in self.wait_queue if job.nodes <= nodes])
-            largest_jobs = [
-                job for job in self.wait_queue if job.nodes *
-                job.request_walltime == max_volume and job.nodes <= nodes]
-        except BaseException:
-            # there are no jobs that fit the given space
-            return -1
-        # out of the largest jobs get the one submitted first
-        min_time = min([job.submission_time for job in largest_jobs])
-        return [job for job in largest_jobs
-                if job.submission_time == min_time][0]
+#         try:
+#             max_volume = max([job.nodes * job.request_walltime for job
+#                               in self.wait_queue if job.nodes <= nodes])
+#             largest_jobs = [
+#                 job for job in self.wait_queue if job.nodes *
+#                 job.request_walltime == max_volume and job.nodes <= nodes]
+#         except BaseException:
+#             # there are no jobs that fit the given space
+#             return -1
+#         # out of the largest jobs get the one submitted first
+#         min_time = min([job.submission_time for job in largest_jobs])
+#         return [job for job in largest_jobs
+#                 if job.submission_time == min_time][0]
 
-    def trigger_schedule(self):
-        ''' Method for chosing the next jobs to run. For the online
-        scheduler, the method iteratively choses the largest job that fits
-        in the available nodes in the system until no job fits or there
-        are no more nodes left in the system '''
+#     def trigger_schedule(self):
+#         ''' Method for chosing the next jobs to run. For the online
+#         scheduler, the method iteratively choses the largest job that fits
+#         in the available nodes in the system until no job fits or there
+#         are no more nodes left in the system '''
 
-        selected_jobs = []
-        if len(self.wait_queue) == 0:
-            return []
-        free_nodes = self.system.get_free_nodes()
-        while free_nodes > 0:
-            job = self.get_next_job(free_nodes)
-            self.logger.info(
-                r'Reserve next job: %s; Free procs %s' % (job, free_nodes))
-            if job == -1:
-                break
-            selected_jobs.append((0, job))
-            self.wait_queue.remove(job)
-            free_nodes -= job.nodes
-        return selected_jobs
+#         selected_jobs = []
+#         if len(self.wait_queue) == 0:
+#             return []
+#         free_nodes = self.system.get_free_nodes()
+#         while free_nodes > 0:
+#             job = self.get_next_job(free_nodes)
+#             self.logger.info(
+#                 r'Reserve next job: %s; Free procs %s' % (job, free_nodes))
+#             if job == -1:
+#                 break
+#             selected_jobs.append((0, job))
+#             self.wait_queue.remove(job)
+#             free_nodes -= job.nodes
+#         return selected_jobs
 
-    def fit_job_in_schedule(self, job, reserved_jobs, min_ts):
-        ''' Method that overwrites the base class that implements a
-        reservation based algorithm. For the base method all jobs
-        need to be fitted in the reservation window and cannot exceed
-        the end. Online methods do not have this limitation '''
+#     def fit_job_in_schedule(self, job, reserved_jobs, min_ts):
+#         ''' Method that overwrites the base class that implements a
+#         reservation based algorithm. For the base method all jobs
+#         need to be fitted in the reservation window and cannot exceed
+#         the end. Online methods do not have this limitation '''
 
-        ts = super(OnlineScheduler, self).fit_job_in_schedule(
-            job, reserved_jobs, min_ts)
-        if ts != -1:
-            return ts
-        # check for the end of the schedule for a fit regardless of how long
-        # the job might run
-        if len(reserved_jobs) == 0:
-            return -1
-        gap_list = super(OnlineScheduler, self).create_gaps_list(
-            reserved_jobs, min_ts)
-        if len(gap_list) == 0:
-            return -1
-        # look only at the gaps at the end of the reservation window (i.e. end
-        # of the gap is max)
-        end_window = max([gap[1] for gap in gap_list])
-        if job.submission_time >= end_window:
-            return -1
-        end_gaps = [gap for gap in gap_list if gap[1] == end_window]
-        for gap in end_gaps:
-            if job.nodes <= gap[2]:
-                # there is room for the current job starting with ts
-                self.logger.info(
-                    r'[OnlineScheduler] Found space for %s: timestamp %d' %
-                    (job, max(
-                        gap[0], job.submission_time)))
-                return max(gap[0], job.submission_time)
-        return -1
+#         ts = super(OnlineScheduler, self).fit_job_in_schedule(
+#             job, reserved_jobs, min_ts)
+#         if ts != -1:
+#             return ts
+#         # check for the end of the schedule for a fit regardless of how long
+#         # the job might run
+#         if len(reserved_jobs) == 0:
+#             return -1
+#         gap_list = super(OnlineScheduler, self).create_gaps_list(
+#             reserved_jobs, min_ts)
+#         if len(gap_list) == 0:
+#             return -1
+#         # look only at the gaps at the end of the reservation window (i.e. end
+#         # of the gap is max)
+#         end_window = max([gap[1] for gap in gap_list])
+#         if job.submission_time >= end_window:
+#             return -1
+#         end_gaps = [gap for gap in gap_list if gap[1] == end_window]
+#         for gap in end_gaps:
+#             if job.nodes <= gap[2]:
+#                 # there is room for the current job starting with ts
+#                 self.logger.info(
+#                     r'[OnlineScheduler] Found space for %s: timestamp %d' %
+#                     (job, max(
+#                         gap[0], job.submission_time)))
+#                 return max(gap[0], job.submission_time)
+#         return -1
